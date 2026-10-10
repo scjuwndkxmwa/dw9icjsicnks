@@ -6,7 +6,7 @@ from pathlib import Path
 
 TIKTOK_URL = "https://www.tiktok.com/@user7977723596063/video/7694847593028816136?is_from_webapp=1&sender_device=pc"
 
-YOUTUBE_STREAM_KEY = "9gs2-gayu-3pjh-wda0-1tp7"
+YOUTUBE_STREAM_KEY = "wew2-r2mr-0fep-k29h-debh"
 YOUTUBE_RTMP = "rtmp://a.rtmp.youtube.com/live2"
 
 WORK_DIR = Path("/tmp/tiktok_video_relay")
