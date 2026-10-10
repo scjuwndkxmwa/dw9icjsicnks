@@ -1,122 +1,165 @@
-
-import subprocess
+import os
 import sys
+import time
+import shutil
+import subprocess
+import json
 from pathlib import Path
 
-# Your TikTok video
-TIKTOK_VIDEO_URL = "https://vt.tiktok.com/ZSbnqudwt/"
+TIKTOK_URL = "https://vt.tiktok.com/ZSbnqudwt/"
+YOUTUBE_STREAM_KEY = "wew2-r2mr-0fep-k29h-debh"
+YOUTUBE_RTMP = "rtmp://a.rtmp.youtube.com/live2"
 
-# YouTube stream key supplied by you
-YOUTUBE_STREAM_KEY = "0fy0-xbfb-dbjt-cym2-2pvc"
-
-YOUTUBE_RTMP = "rtmp://a.rtmp.youtube.com/live2/"
 DOWNLOAD_DIR = Path("/tmp/tiktok_download")
-STATE_DIR = Path("/data")
-DONE_FILE = STATE_DIR / "youtube_attempted.txt"
+DATA_DIR = Path("/data")
+DONE_FILE = DATA_DIR / "youtube_attempted.txt"
 
 
 def log(message):
     print(message, flush=True)
 
 
-def run(command):
-    result = subprocess.run(command)
+def check_dependencies():
+    for program in ("ffmpeg", "ffprobe"):
+        if not shutil.which(program):
+            raise RuntimeError(f"Missing dependency: {program}")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "yt_dlp", "--version"],
+        capture_output=True,
+        text=True
+    )
     if result.returncode != 0:
-        raise RuntimeError(
-            f"Command failed with exit code {result.returncode}"
-        )
+        raise RuntimeError("yt-dlp is not installed correctly.")
 
 
-def main():
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-
-    if DONE_FILE.exists():
-        log("[STOP] Previous attempt recorded; refusing to replay.")
-        return
-
+def download_video():
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    output_template = str(DOWNLOAD_DIR / "video.%(ext)s")
 
-    log("[DOWNLOAD] Downloading TikTok post...")
-    run([
+    for item in DOWNLOAD_DIR.iterdir():
+        if item.is_file():
+            item.unlink()
+
+    command = [
         sys.executable, "-m", "yt_dlp",
         "--no-playlist",
-        "--format", "best",
-        "--output", output_template,
-        TIKTOK_VIDEO_URL,
-    ])
-
-    videos = [
-        p for p in DOWNLOAD_DIR.glob("video.*")
-        if p.is_file() and p.stat().st_size > 1024
+        "--no-warnings",
+        "-f", "bestvideo+bestaudio/best",
+        "--merge-output-format", "mp4",
+        "-o", str(DOWNLOAD_DIR / "video.%(ext)s"),
+        TIKTOK_URL
     ]
-    if not videos:
-        raise RuntimeError(
-            "TikTok video download failed. Check Railway logs."
-        )
 
-    video = videos[0]
-    log(f"[DOWNLOAD] Saved {video.stat().st_size / 1048576:.2f} MB")
+    log("[DOWNLOAD] Downloading TikTok video...")
+    subprocess.run(command, check=True)
 
-    probe = subprocess.run(
+    candidates = [
+        p for p in DOWNLOAD_DIR.iterdir()
+        if p.is_file()
+        and p.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}
+    ]
+
+    if not candidates:
+        raise RuntimeError("No downloaded video file was found.")
+
+    video = max(candidates, key=lambda p: p.stat().st_size)
+
+    if video.stat().st_size == 0:
+        raise RuntimeError("Downloaded video is empty.")
+
+    return video
+
+
+def check_media(video):
+    result = subprocess.run(
         [
             "ffprobe", "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=codec_name",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            str(video),
+            "-show_entries", "stream=codec_type,codec_name,sample_rate,channels",
+            "-of", "json", str(video)
         ],
         capture_output=True,
         text=True,
-    )
-    if probe.returncode != 0 or not probe.stdout.strip():
-        raise RuntimeError("Downloaded file has no readable video stream")
-
-    codec = probe.stdout.strip().lower()
-    if codec == "h264":
-        video_args = ["-c:v", "copy"]
-        log("[VIDEO] H.264: copy mode enabled")
-    else:
-        video_args = [
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-pix_fmt", "yuv420p",
-        ]
-        log("[VIDEO] Converting video to H.264")
-
-    # Save the marker before streaming to avoid automatic replay.
-    DONE_FILE.write_text(
-        "Transmission attempt started; no automatic replay.\n",
-        encoding="utf-8",
+        check=True
     )
 
-    target = YOUTUBE_RTMP + YOUTUBE_STREAM_KEY
+    streams = json.loads(result.stdout).get("streams", [])
+
+    for stream in streams:
+        log(
+            f"[MEDIA] type={stream.get('codec_type')} "
+            f"codec={stream.get('codec_name')} "
+            f"rate={stream.get('sample_rate')} "
+            f"channels={stream.get('channels')}"
+        )
+
+    if not any(s.get("codec_type") == "video" for s in streams):
+        raise RuntimeError("Downloaded file has no video stream.")
+
+    if not any(s.get("codec_type") == "audio" for s in streams):
+        raise RuntimeError("Downloaded file has no audio stream.")
+
+
+def stream_to_youtube(video):
+    output_url = f"{YOUTUBE_RTMP}/{YOUTUBE_STREAM_KEY}"
+
     command = [
         "ffmpeg",
         "-hide_banner",
+        "-loglevel", "info",
         "-nostdin",
-        "-loglevel", "warning",
         "-re",
         "-i", str(video),
         "-map", "0:v:0",
-        *video_args,
-        "-map", "0:a:0?",
+        "-map", "0:a:0",
+        "-c:v", "copy",
         "-c:a", "aac",
         "-b:a", "128k",
         "-ar", "44100",
         "-ac", "2",
         "-f", "flv",
-        target,
+        output_url
     ]
 
-    log("[YOUTUBE] Sending video once; looping disabled")
-    run(command)
-    log("[SUCCESS] Transmission finished")
+    log("[LIVE] Video: COPY")
+    log("[LIVE] Audio: AAC 128k, 44100 Hz, stereo")
+    log("[LIVE] Sending video to YouTube once...")
+
+    subprocess.run(command, check=True)
+
+    log("[DONE] Stream finished successfully.")
+
+
+def main():
+    log("=" * 50)
+    log("[SYSTEM] TikTok video -> YouTube Live")
+    log("=" * 50)
+
+    check_dependencies()
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    if DONE_FILE.exists():
+        log("[STOP] This video was already attempted.")
+        log("[STOP] No automatic duplicate attempt.")
+        return
+
+    video = download_video()
+    check_media(video)
+
+    # Record the attempt before streaming to avoid replay on restart.
+    DONE_FILE.write_text(
+        time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+        encoding="utf-8"
+    )
+
+    stream_to_youtube(video)
 
 
 if __name__ == "__main__":
     try:
         main()
+    except subprocess.CalledProcessError as exc:
+        log(f"[ERROR] Command failed with code {exc.returncode}")
+        sys.exit(exc.returncode or 1)
     except Exception as exc:
-        log(f"[FATAL] {exc}")
+        log(f"[ERROR] {exc}")
         sys.exit(1)
