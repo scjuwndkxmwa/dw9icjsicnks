@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 TIKTOK_URL = os.getenv("TIKTOK_URL", "https://vt.tiktok.com/ZSbnqudwt/")
-YOUTUBE_STREAM_KEY = os.getenv("YOUTUBE_STREAM_KEY", "")
+YOUTUBE_STREAM_KEY = os.getenv("YOUTUBE_STREAM_KEY", "9gs2-gayu-3pjh-wda0-1tp7")
 
 YOUTUBE_RTMP = "rtmp://a.rtmp.youtube.com/live2"
 WORK_DIR = Path("/tmp/tiktok_video_relay")
