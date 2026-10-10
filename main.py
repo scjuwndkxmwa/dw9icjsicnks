@@ -1,4 +1,4 @@
-import os
+
 import sys
 import time
 import shutil
@@ -30,7 +30,7 @@ def check_dependencies():
         text=True
     )
     if result.returncode != 0:
-        raise RuntimeError("yt-dlp is not installed correctly.")
+        raise RuntimeError("yt-dlp is not installed.")
 
 
 def download_video():
@@ -60,13 +60,14 @@ def download_video():
     ]
 
     if not candidates:
-        raise RuntimeError("No downloaded video file was found.")
+        raise RuntimeError("No downloaded video found.")
 
     video = max(candidates, key=lambda p: p.stat().st_size)
 
     if video.stat().st_size == 0:
-        raise RuntimeError("Downloaded video is empty.")
+        raise RuntimeError("Downloaded file is empty.")
 
+    log(f"[DOWNLOAD] File: {video}")
     return video
 
 
@@ -74,7 +75,8 @@ def check_media(video):
     result = subprocess.run(
         [
             "ffprobe", "-v", "error",
-            "-show_entries", "stream=codec_type,codec_name,sample_rate,channels",
+            "-show_entries",
+            "stream=codec_type,codec_name,sample_rate,channels",
             "-of", "json", str(video)
         ],
         capture_output=True,
@@ -86,17 +88,17 @@ def check_media(video):
 
     for stream in streams:
         log(
-            f"[MEDIA] type={stream.get('codec_type')} "
+            f"[MEDIA] {stream.get('codec_type')} "
             f"codec={stream.get('codec_name')} "
             f"rate={stream.get('sample_rate')} "
             f"channels={stream.get('channels')}"
         )
 
     if not any(s.get("codec_type") == "video" for s in streams):
-        raise RuntimeError("Downloaded file has no video stream.")
+        raise RuntimeError("No video stream found.")
 
     if not any(s.get("codec_type") == "audio" for s in streams):
-        raise RuntimeError("Downloaded file has no audio stream.")
+        raise RuntimeError("No audio stream found.")
 
 
 def stream_to_youtube(video):
@@ -107,26 +109,37 @@ def stream_to_youtube(video):
         "-hide_banner",
         "-loglevel", "info",
         "-nostdin",
-        "-re",
+
+        # Regenerate missing timestamps where possible.
+        "-fflags", "+genpts",
         "-i", str(video),
+
         "-map", "0:v:0",
         "-map", "0:a:0",
+
+        # Preserve the original video stream.
         "-c:v", "copy",
+        "-copytb", "1",
+
+        # Re-encode audio and compensate for timestamp drift.
+        "-af", "aresample=async=1000:first_pts=0",
         "-c:a", "aac",
         "-b:a", "128k",
         "-ar", "44100",
         "-ac", "2",
+
+        "-max_muxing_queue_size", "2048",
+        "-avoid_negative_ts", "make_zero",
+        "-flvflags", "no_duration_filesize",
         "-f", "flv",
         output_url
     ]
 
     log("[LIVE] Video: COPY")
     log("[LIVE] Audio: AAC 128k, 44100 Hz, stereo")
-    log("[LIVE] Sending video to YouTube once...")
-
+    log("[LIVE] Audio timestamp compensation enabled.")
     subprocess.run(command, check=True)
-
-    log("[DONE] Stream finished successfully.")
+    log("[DONE] Stream finished.")
 
 
 def main():
@@ -139,13 +152,13 @@ def main():
 
     if DONE_FILE.exists():
         log("[STOP] This video was already attempted.")
-        log("[STOP] No automatic duplicate attempt.")
+        log("[STOP] No automatic replay.")
         return
 
     video = download_video()
     check_media(video)
 
-    # Record the attempt before streaming to avoid replay on restart.
+    # Prevent a duplicate attempt after a Railway restart.
     DONE_FILE.write_text(
         time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
         encoding="utf-8"
@@ -158,7 +171,7 @@ if __name__ == "__main__":
     try:
         main()
     except subprocess.CalledProcessError as exc:
-        log(f"[ERROR] Command failed with code {exc.returncode}")
+        log(f"[ERROR] Command failed: exit code {exc.returncode}")
         sys.exit(exc.returncode or 1)
     except Exception as exc:
         log(f"[ERROR] {exc}")
